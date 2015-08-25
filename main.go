@@ -479,7 +479,7 @@ func handleRenderPB(w http.ResponseWriter, req *http.Request, format string, res
 
 		logger.Tracef("request: %s: %q %+v", req.URL.RequestURI(), name, decoded)
 
-		if len(decoded) == 1 {
+		if len(decoded) >= 1 {
 			logger.Debugf("only one decoded responses to merge for req: %q %s", name, req.URL.RequestURI())
 			m := decoded[0]
 			multi.Metrics = append(multi.Metrics, &m)
