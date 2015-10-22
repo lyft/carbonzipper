@@ -656,6 +656,8 @@ func main() {
 	debugLevel := flag.Int("d", 0, "enable debug logging")
 	logtostdout := flag.Bool("stdout", false, "write logging output also to stdout")
 	logdir := flag.String("logdir", "/var/log/carbonzipper/", "logging directory")
+	logDuration := flag.Duration("logDuration", 1 * time.Hour, "How long to keep a log file")
+	logMax := flag.Duration("logMaxAge", 2 * time.Hour, "How long to keep rotated logs")
 
 	flag.Parse()
 
@@ -703,6 +705,8 @@ func main() {
 
 	// Optional fields must be set afterwards
 	rl.LinkName = *logdir + "/carbonzipper.log"
+	rl.RotationTime = *logDuration
+	rl.MaxAge = *logMax
 
 	if *logtostdout {
 		log.SetOutput(io.MultiWriter(os.Stdout, rl))
