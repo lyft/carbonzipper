@@ -7,7 +7,6 @@ import (
 	"expvar"
 	"flag"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -17,16 +16,14 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/gogo/protobuf/proto"
-
 	pb "github.com/dgryski/carbonzipper/carbonzipperpb"
+	"github.com/dgryski/carbonzipper/mlog"
+	"github.com/dgryski/go-expirecache"
 	"github.com/dgryski/httputil"
 	pickle "github.com/kisielk/og-rek"
-	"github.com/lestrrat/go-file-rotatelogs"
 	"github.com/peterbourgon/g2g"
 )
 
@@ -42,8 +39,7 @@ var Config = struct {
 
 	GraphiteHost string
 
-	mu          sync.RWMutex
-	metricPaths map[string][]string
+	pathCache pathCache
 
 	MaxIdleConnsPerHost int
 
@@ -58,7 +54,7 @@ var Config = struct {
 
 	MaxIdleConnsPerHost: 100,
 
-	metricPaths: make(map[string][]string),
+	pathCache: pathCache{ec: expirecache.New(0)},
 }
 
 // grouped expvars for /debug/vars and graphite
@@ -73,6 +69,9 @@ var Metrics = struct {
 	InfoErrors   *expvar.Int
 
 	Timeouts *expvar.Int
+
+	CacheSize  expvar.Func
+	CacheItems expvar.Func
 }{
 	FindRequests: expvar.NewInt("find_requests"),
 	FindErrors:   expvar.NewInt("find_errors"),
@@ -90,7 +89,7 @@ var BuildVersion = "(development version)"
 
 var Limiter serverLimiter
 
-var logger logLevel
+var logger mlog.Level
 
 type serverResponse struct {
 	server   string
@@ -115,12 +114,10 @@ func doProbe() {
 	_, paths := findHandlerPB(nil, nil, responses)
 
 	// update our cache of which servers have which metrics
-	Config.mu.Lock()
 	for k, v := range paths {
-		Config.metricPaths[k] = v
+		Config.pathCache.set(k, v)
 		logger.Debugln("TLD probe:", k, "servers =", v)
 	}
-	Config.mu.Unlock()
 }
 
 func probeTlds() {
@@ -251,7 +248,7 @@ func findHandlerPB(w http.ResponseWriter, req *http.Request, responses []serverR
 	var metrics []*pb.GlobMatch
 	for _, r := range responses {
 		var metric pb.GlobResponse
-		err := proto.Unmarshal(r.response, &metric)
+		err := metric.Unmarshal(r.response)
 		if err != nil && req != nil {
 			logger.Logf("error decoding protobuf response from server:%s: req:%s: err=%s", r.server, req.URL.RequestURI(), err)
 			logger.Traceln("\n" + hex.Dump(r.response))
@@ -297,13 +294,11 @@ func findHandler(w http.ResponseWriter, req *http.Request) {
 	}
 	// lookup tld in our map of where they live to reduce the set of
 	// servers we bug with our find
-	Config.mu.RLock()
 	var backends []string
 	var ok bool
-	if backends, ok = Config.metricPaths[tld]; !ok || backends == nil || len(backends) == 0 {
+	if backends, ok = Config.pathCache.get(tld); !ok || backends == nil || len(backends) == 0 {
 		backends = Config.Backends
 	}
-	Config.mu.RUnlock()
 
 	responses := multiGet(backends, rewrite.RequestURI())
 
@@ -316,11 +311,9 @@ func findHandler(w http.ResponseWriter, req *http.Request) {
 	metrics, paths := findHandlerPB(w, req, responses)
 
 	// update our cache of which servers have which metrics
-	Config.mu.Lock()
 	for k, v := range paths {
-		Config.metricPaths[k] = v
+		Config.pathCache.set(k, v)
 	}
-	Config.mu.Unlock()
 
 	switch format {
 	case "protobuf":
@@ -329,7 +322,7 @@ func findHandler(w http.ResponseWriter, req *http.Request) {
 		query := req.FormValue("query")
 		result.Name = &query
 		result.Matches = metrics
-		b, _ := proto.Marshal(&result)
+		b, _ := result.Marshal()
 		w.Write(b)
 	case "json":
 		w.Header().Set("Content-Type", "application/json")
@@ -370,12 +363,10 @@ func renderHandler(w http.ResponseWriter, req *http.Request) {
 	var serverList []string
 	var ok bool
 
-	Config.mu.RLock()
 	// lookup the server list for this metric, or use all the servers if it's unknown
-	if serverList, ok = Config.metricPaths[target]; !ok || serverList == nil || len(serverList) == 0 {
+	if serverList, ok = Config.pathCache.get(target); !ok || serverList == nil || len(serverList) == 0 {
 		serverList = Config.Backends
 	}
-	Config.mu.RUnlock()
 
 	format := req.FormValue("format")
 	rewrite, _ := url.ParseRequestURI(req.URL.RequestURI())
@@ -429,7 +420,7 @@ func returnRender(w http.ResponseWriter, format string, metrics pb.MultiFetchRes
 	switch format {
 	case "protobuf":
 		w.Header().Set("Content-Type", "application/protobuf")
-		b, _ := proto.Marshal(&metrics)
+		b, _ := metrics.Marshal()
 		w.Write(b)
 
 	case "json":
@@ -453,7 +444,7 @@ func handleRenderPB(w http.ResponseWriter, req *http.Request, format string, res
 
 	for _, r := range responses {
 		var d pb.MultiFetchResponse
-		err := proto.Unmarshal(r.response, &d)
+		err := d.Unmarshal(r.response)
 		if err != nil {
 			logger.Logf("error decoding protobuf response from server:%s: req:%s: err=%s", r.server, req.URL.RequestURI(), err)
 			logger.Traceln("\n" + hex.Dump(r.response))
@@ -548,7 +539,7 @@ func infoHandlerPB(w http.ResponseWriter, req *http.Request, format string, resp
 			continue
 		}
 		var d pb.InfoResponse
-		err := json.Unmarshal(r.response, &d) // should be proto
+		err := d.Unmarshal(r.response)
 		if err != nil {
 			logger.Logf("error decoding protobuf response from server:%s: req:%s: err=%s", r.server, req.URL.RequestURI(), err)
 			logger.Traceln("\n" + hex.Dump(r.response))
@@ -558,7 +549,7 @@ func infoHandlerPB(w http.ResponseWriter, req *http.Request, format string, resp
 		decoded[r.server] = d
 	}
 
-	logger.Traceln("request: %s: %v", req.URL.RequestURI(), decoded)
+	logger.Tracef("request: %s: %v", req.URL.RequestURI(), decoded)
 
 	return decoded
 }
@@ -580,12 +571,10 @@ func infoHandler(w http.ResponseWriter, req *http.Request) {
 	var serverList []string
 	var ok bool
 
-	Config.mu.RLock()
 	// lookup the server list for this metric, or use all the servers if it's unknown
-	if serverList, ok = Config.metricPaths[target]; !ok || serverList == nil || len(serverList) == 0 {
+	if serverList, ok = Config.pathCache.get(target); !ok || serverList == nil || len(serverList) == 0 {
 		serverList = Config.Backends
 	}
-	Config.mu.RUnlock()
 
 	format := req.FormValue("format")
 	rewrite, _ := url.ParseRequestURI(req.URL.RequestURI())
@@ -615,7 +604,7 @@ func infoHandler(w http.ResponseWriter, req *http.Request) {
 			r.Info = &i
 			result.Responses = append(result.Responses, &r)
 		}
-		b, _ := proto.Marshal(&result)
+		b, _ := result.Marshal()
 		w.Write(b)
 	case "", "json":
 		w.Header().Set("Content-Type", "application/json")
@@ -656,8 +645,6 @@ func main() {
 	debugLevel := flag.Int("d", 0, "enable debug logging")
 	logtostdout := flag.Bool("stdout", false, "write logging output also to stdout")
 	logdir := flag.String("logdir", "/var/log/carbonzipper/", "logging directory")
-	logDuration := flag.Duration("logDuration", 1 * time.Hour, "How long to keep a log file")
-	logMax := flag.Duration("logMaxAge", 2 * time.Hour, "How long to keep rotated logs")
 
 	flag.Parse()
 
@@ -698,23 +685,9 @@ func main() {
 	}
 
 	// set up our logging
+	mlog.SetOutput(*logdir, "carbonzipper", *logtostdout)
+	logger = mlog.Level(*debugLevel)
 
-	rl := rotatelogs.NewRotateLogs(
-		*logdir + "/carbonzipper.%Y%m%d%H%M.log",
-	)
-
-	// Optional fields must be set afterwards
-	rl.LinkName = *logdir + "/carbonzipper.log"
-	rl.RotationTime = *logDuration
-	rl.MaxAge = *logMax
-
-	if *logtostdout {
-		log.SetOutput(io.MultiWriter(os.Stdout, rl))
-	} else {
-		log.SetOutput(rl)
-	}
-
-	logger = logLevel(*debugLevel)
 	logger.Logln("starting carbonzipper", BuildVersion)
 
 	logger.Logln("setting GOMAXPROCS=", Config.MaxProcs)
@@ -733,6 +706,12 @@ func main() {
 
 	// export config via expvars
 	expvar.Publish("Config", expvar.Func(func() interface{} { return Config }))
+
+	Metrics.CacheSize = expvar.Func(func() interface{} { return Config.pathCache.ec.Size() })
+	expvar.Publish("cacheSize", Metrics.CacheSize)
+
+	Metrics.CacheItems = expvar.Func(func() interface{} { return Config.pathCache.ec.Items() })
+	expvar.Publish("cacheItems", Metrics.CacheItems)
 
 	http.HandleFunc("/metrics/find/", httputil.TrackConnections(httputil.TimeHandler(findHandler, bucketRequestTimes)))
 	http.HandleFunc("/render/", httputil.TrackConnections(httputil.TimeHandler(renderHandler, bucketRequestTimes)))
@@ -774,6 +753,9 @@ func main() {
 		for i := 0; i <= Config.Buckets; i++ {
 			graphite.Register(fmt.Sprintf("carbon.zipper.%s.requests_in_%dms_to_%dms", hostname, i*100, (i+1)*100), bucketEntry(i))
 		}
+
+		graphite.Register(fmt.Sprintf("carbon.zipper.%s.cache_size", hostname), Metrics.CacheSize)
+		graphite.Register(fmt.Sprintf("carbon.zipper.%s.cache_items", hostname), Metrics.CacheItems)
 	}
 
 	// configure the storage client
@@ -784,6 +766,8 @@ func main() {
 	go probeTlds()
 	// force run now
 	probeForce <- 1
+
+	go Config.pathCache.ec.ApproximateCleaner(10 * time.Second)
 
 	portStr := fmt.Sprintf(":%d", Config.Port)
 	logger.Logln("listening on", portStr)
@@ -817,47 +801,6 @@ func bucketRequestTimes(req *http.Request, t time.Duration) {
 	}
 }
 
-// trivial logging classes
-
-type logLevel int
-
-const (
-	LOG_NORMAL logLevel = iota
-	LOG_DEBUG
-	LOG_TRACE
-)
-
-func (ll logLevel) Debugf(format string, a ...interface{}) {
-	if ll >= LOG_DEBUG {
-		log.Printf(format, a...)
-	}
-}
-
-func (ll logLevel) Debugln(a ...interface{}) {
-	if ll >= LOG_DEBUG {
-		log.Println(a...)
-	}
-}
-
-func (ll logLevel) Tracef(format string, a ...interface{}) {
-	if ll >= LOG_TRACE {
-		log.Printf(format, a...)
-	}
-}
-
-func (ll logLevel) Traceln(a ...interface{}) {
-	if ll >= LOG_TRACE {
-		log.Println(a...)
-	}
-}
-func (ll logLevel) Logln(a ...interface{}) {
-	log.Println(a...)
-}
-
-func (ll logLevel) Logf(format string, a ...interface{}) {
-	log.Printf(format, a...)
-}
-
 type serverLimiter map[string]chan struct{}
 
 func newServerLimiter(servers []string, l int) serverLimiter {
@@ -882,4 +825,23 @@ func (sl serverLimiter) leave(s string) {
 		return
 	}
 	<-sl[s]
+}
+
+type pathCache struct {
+	ec *expirecache.Cache
+}
+
+func (p *pathCache) set(k string, v []string) {
+	// expire cache entries after 10 minutes
+	const expireDelay = 60 * 10
+	p.ec.Set(k, v, 0, expireDelay)
+}
+
+func (p *pathCache) get(k string) ([]string, bool) {
+	v, ok := p.ec.Get(k)
+	if !ok {
+		return nil, false
+	}
+
+	return v.([]string), true
 }
