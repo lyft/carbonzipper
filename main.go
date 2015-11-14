@@ -643,7 +643,7 @@ func main() {
 	port := flag.Int("p", 0, "port to listen on")
 	maxprocs := flag.Int("maxprocs", 0, "GOMAXPROCS")
 	debugLevel := flag.Int("d", 0, "enable debug logging")
-	logtostdout := flag.Bool("stdout", false, "write logging output also to stdout")
+	logtostdout := flag.Bool("stdout", false, "write logging output to stdout only")
 	logdir := flag.String("logdir", "/var/log/carbonzipper/", "logging directory")
 
 	flag.Parse()
@@ -685,7 +685,11 @@ func main() {
 	}
 
 	// set up our logging
-	mlog.SetOutput(*logdir, "carbonzipper", *logtostdout)
+	if *logtostdout {
+		log.SetOutput(os.Stdout)
+	} else {
+		mlog.SetOutput(*logdir, "carbonzipper", *logtostdout)
+	}
 
 	logger = mlog.Level(*debugLevel)
 	logger.Logln("starting carbonzipper", BuildVersion)
