@@ -735,7 +735,7 @@ func main() {
 		logger.Logln("Using graphite host", Config.GraphiteHost)
 
 		// register our metrics with graphite
-		graphite := g2g.NewGraphite(Config.GraphiteHost, *interval, 10*time.Second)
+		graphite := g2g.NewGraphite(Config.GraphiteHost, 60*time.Second, 10*time.Second)
 
 		hostname, _ := os.Hostname()
 		hostname = strings.Replace(hostname, ".", "_", -1)
