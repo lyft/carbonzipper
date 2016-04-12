@@ -1,0 +1,47 @@
+{
+	"ImportPath": "github.com/lyft/carbonzipper",
+	"GoVersion": "go1.6",
+	"GodepVersion": "v62",
+	"Deps": [
+		{
+			"ImportPath": "bitbucket.org/tebeka/strftime",
+			"Comment": "0.1.2-4",
+			"Rev": "'2194253a23c090a4d5953b152a3c63fb5da4f5a4'"
+		},
+		{
+			"ImportPath": "github.com/dgryski/carbonzipper/carbonzipperpb",
+			"Comment": "0.29-40-g462ed6c",
+			"Rev": "462ed6c63dac9e90759f879f510ec59a7cc42e8e"
+		},
+		{
+			"ImportPath": "github.com/dgryski/carbonzipper/mlog",
+			"Comment": "0.29-40-g462ed6c",
+			"Rev": "462ed6c63dac9e90759f879f510ec59a7cc42e8e"
+		},
+		{
+			"ImportPath": "github.com/dgryski/go-expirecache",
+			"Rev": "310e3fa1f3caab1e6b9f8b354ce67fa10bfef2bd"
+		},
+		{
+			"ImportPath": "github.com/dgryski/httputil",
+			"Rev": "189c2918cd08517364b3ede5417684ca7a7341fe"
+		},
+		{
+			"ImportPath": "github.com/gogo/protobuf/proto",
+			"Comment": "v0.2-9-g4365f75",
+			"Rev": "4365f750fe246471f2a03ef5da5231c3565c5628"
+		},
+		{
+			"ImportPath": "github.com/kisielk/og-rek",
+			"Rev": "28bae785206e71d70d9c770903d06abb87547734"
+		},
+		{
+			"ImportPath": "github.com/lestrrat/go-file-rotatelogs",
+			"Rev": "bb1d28fd5ac7ec9873540d5bba975d009f271f67"
+		},
+		{
+			"ImportPath": "github.com/peterbourgon/g2g",
+			"Rev": "d7b3b6853c2a43202a2475b3bb23e886371fe1a4"
+		}
+	]
+}
